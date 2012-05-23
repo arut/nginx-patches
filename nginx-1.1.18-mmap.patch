@@ -1,0 +1,140 @@
+diff --git a/src/core/ngx_palloc.c b/src/core/ngx_palloc.c
+index efbc244..c0c07bd 100644
+--- a/src/core/ngx_palloc.c
++++ b/src/core/ngx_palloc.c
+@@ -13,15 +13,49 @@ static void *ngx_palloc_block(ngx_pool_t *pool, size_t size);
+ static void *ngx_palloc_large(ngx_pool_t *pool, size_t size);
+ 
+ 
++#ifdef NGX_LINUX
++static void *
++ngx_direct_alloc(size_t size, ngx_log_t *log)
++{
++    void       *p;
++
++    p = mmap(NULL, size, PROT_READ | PROT_WRITE,
++            MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
++    if (p == MAP_FAILED) {
++        ngx_log_error(NGX_LOG_ALERT, log, ngx_errno,
++                "mmap failed");
++        return NULL;
++    }
++
++    ngx_log_debug2(NGX_LOG_DEBUG_ALLOC, log, 0,
++            "mmap: %p:%uz", p, size);
++    return p;
++}
++#endif
++
++
+ ngx_pool_t *
+ ngx_create_pool(size_t size, ngx_log_t *log)
+ {
+     ngx_pool_t  *p;
+ 
+-    p = ngx_memalign(NGX_POOL_ALIGNMENT, size, log);
+-    if (p == NULL) {
+-        return NULL;
++#ifdef NGX_LINUX
++    if ((size & (ngx_pagesize - 1)) == 0) {
++        p = ngx_direct_alloc(size, log);
++        if (p == NULL) {
++            return NULL;
++        }
++        p->direct = 1;
++    } else {
++#endif
++        p = ngx_memalign(NGX_POOL_ALIGNMENT, size, log);
++        if (p == NULL) {
++            return NULL;
++        }
++#ifdef NGX_LINUX
++        p->direct = 0;
+     }
++#endif
+ 
+     p->d.last = (u_char *) p + sizeof(ngx_pool_t);
+     p->d.end = (u_char *) p + size;
+@@ -47,6 +81,10 @@ ngx_destroy_pool(ngx_pool_t *pool)
+     ngx_pool_t          *p, *n;
+     ngx_pool_large_t    *l;
+     ngx_pool_cleanup_t  *c;
++#ifdef NGX_LINUX
++    ngx_uint_t           direct;
++    ngx_log_t           *log;
++#endif
+ 
+     for (c = pool->cleanup; c; c = c->next) {
+         if (c->handler) {
+@@ -71,10 +109,23 @@ ngx_destroy_pool(ngx_pool_t *pool)
+      * we could allocate the pool->log from this pool
+      * so we cannot use this log while free()ing the pool
+      */
++#ifdef NGX_LINUX
++    direct = pool->direct;
++    log = pool->log;
++#endif
+ 
+     for (p = pool, n = pool->d.next; /* void */; p = n, n = n->d.next) {
+-        ngx_log_debug2(NGX_LOG_DEBUG_ALLOC, pool->log, 0,
++#ifdef NGX_LINUX
++        if (direct) {
++            ngx_log_debug2(NGX_LOG_DEBUG_ALLOC, pool->log, 0,
++                       "munmap: %p, unused: %uz", p, p->d.end - p->d.last);
++        } else {
++#endif
++            ngx_log_debug2(NGX_LOG_DEBUG_ALLOC, pool->log, 0,
+                        "free: %p, unused: %uz", p, p->d.end - p->d.last);
++#ifdef NGX_LINUX
++        }
++#endif
+ 
+         if (n == NULL) {
+             break;
+@@ -84,7 +135,18 @@ ngx_destroy_pool(ngx_pool_t *pool)
+ #endif
+ 
+     for (p = pool, n = pool->d.next; /* void */; p = n, n = n->d.next) {
+-        ngx_free(p);
++#ifdef NGX_LINUX
++        if (direct) {
++            if (munmap(p, p->d.end - (u_char *)p) == -1) {
++                ngx_log_error(NGX_LOG_ALERT, log, ngx_errno,
++                        "munmap failed");
++            }
++        } else {
++#endif
++            ngx_free(p);
++#ifdef NGX_LINUX
++        }
++#endif
+ 
+         if (n == NULL) {
+             break;
+@@ -182,7 +244,11 @@ ngx_palloc_block(ngx_pool_t *pool, size_t size)
+ 
+     psize = (size_t) (pool->d.end - (u_char *) pool);
+ 
+-    m = ngx_memalign(NGX_POOL_ALIGNMENT, psize, pool->log);
++    m = 
++#ifdef NGX_LINUX
++        pool->direct ? ngx_direct_alloc(psize, pool->log) :
++#endif
++        ngx_memalign(NGX_POOL_ALIGNMENT, psize, pool->log);
+     if (m == NULL) {
+         return NULL;
+     }
+diff --git a/src/core/ngx_palloc.h b/src/core/ngx_palloc.h
+index d652829..30d39fb 100644
+--- a/src/core/ngx_palloc.h
++++ b/src/core/ngx_palloc.h
+@@ -62,6 +62,9 @@ struct ngx_pool_s {
+     ngx_pool_large_t     *large;
+     ngx_pool_cleanup_t   *cleanup;
+     ngx_log_t            *log;
++#ifdef NGX_LINUX
++    ngx_uint_t            direct;
++#endif
+ };
+ 
+ 
