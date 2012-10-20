@@ -1,0 +1,190 @@
+ src/core/ngx_file.c                    |   29 +++++++++++++++++++++++++++++
+ src/core/ngx_file.h                    |    2 ++
+ src/http/modules/ngx_http_dav_module.c |   32 ++++++++++++++++++++++++++------
+ src/os/unix/ngx_files.h                |    4 ++++
+ 4 files changed, 61 insertions(+), 6 deletions(-)
+
+diff --git a/src/core/ngx_file.c b/src/core/ngx_file.c
+index d9b30f8..d66320c 100644
+--- a/src/core/ngx_file.c
++++ b/src/core/ngx_file.c
+@@ -608,6 +608,7 @@ ngx_ext_rename_file(ngx_str_t *src, ngx_str_t *to, ngx_ext_rename_file_t *ext)
+         cf.access = ext->access;
+         cf.time = ext->time;
+         cf.log = ext->log;
++        cf.hardlink = 0;
+ 
+         name = ngx_alloc(to->len + 1 + 10 + 1, ext->log);
+         if (name == NULL) {
+@@ -681,6 +682,32 @@ ngx_copy_file(u_char *from, u_char *to, ngx_copy_file_t *cf)
+     rc = NGX_ERROR;
+     buf = NULL;
+     nfd = NGX_INVALID_FILE;
++    fd = NGX_INVALID_FILE;
++
++#if !(NGX_WIN32)
++    
++    if (cf->hardlink) {
++        rc = ngx_hardlink_file(from, to);
++
++        if (rc == NGX_FILE_ERROR && ngx_errno != NGX_EXDEV) {
++            ngx_log_error(NGX_LOG_CRIT, cf->log, ngx_errno,
++                          ngx_hardlink_file_n " \"%s\" to \"%s\" failed",
++                          from, to);
++            goto failed;
++        }
++
++        if (rc == NGX_OK) {
++            if (ngx_change_file_access(to, cf->access) == NGX_FILE_ERROR) {
++                ngx_log_error(NGX_LOG_EMERG, cf->log, ngx_errno,
++                              ngx_change_file_access_n " \"%s\" failed", to);
++                goto failed;
++            }
++
++            goto done;
++        }
++    }
++
++#endif
+ 
+     fd = ngx_open_file(from, NGX_FILE_RDONLY, NGX_FILE_OPEN, 0);
+ 
+@@ -763,6 +790,8 @@ ngx_copy_file(u_char *from, u_char *to, ngx_copy_file_t *cf)
+         size -= n;
+     }
+ 
++done:
++
+     if (cf->time != -1) {
+         if (ngx_set_file_time(to, nfd, cf->time) != NGX_OK) {
+             ngx_log_error(NGX_LOG_ALERT, cf->log, ngx_errno,
+diff --git a/src/core/ngx_file.h b/src/core/ngx_file.h
+index 7023e67..81c706a 100644
+--- a/src/core/ngx_file.h
++++ b/src/core/ngx_file.h
+@@ -94,6 +94,8 @@ typedef struct {
+     ngx_uint_t                 access;
+     time_t                     time;
+ 
++    unsigned                   hardlink:1;
++
+     ngx_log_t                 *log;
+ } ngx_copy_file_t;
+ 
+diff --git a/src/http/modules/ngx_http_dav_module.c b/src/http/modules/ngx_http_dav_module.c
+index dbb17ac..53560a6 100644
+--- a/src/http/modules/ngx_http_dav_module.c
++++ b/src/http/modules/ngx_http_dav_module.c
+@@ -21,16 +21,18 @@
+ 
+ 
+ typedef struct {
+-    ngx_uint_t  methods;
+-    ngx_uint_t  access;
+-    ngx_uint_t  min_delete_depth;
+-    ngx_flag_t  create_full_put_path;
++    ngx_uint_t           methods;
++    ngx_uint_t           access;
++    ngx_uint_t           min_delete_depth;
++    ngx_flag_t           create_full_put_path;
++    ngx_flag_t           hardlink;
+ } ngx_http_dav_loc_conf_t;
+ 
+ 
+ typedef struct {
+-    ngx_str_t   path;
+-    size_t      len;
++    ngx_str_t            path;
++    size_t               len;
++    ngx_http_request_t  *request;
+ } ngx_http_dav_copy_ctx_t;
+ 
+ 
+@@ -106,6 +108,13 @@ static ngx_command_t  ngx_http_dav_commands[] = {
+       offsetof(ngx_http_dav_loc_conf_t, access),
+       NULL },
+ 
++    { ngx_string("dav_copy_hardlink"),
++      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_FLAG,
++      ngx_conf_set_flag_slot,
++      NGX_HTTP_LOC_CONF_OFFSET,
++      offsetof(ngx_http_dav_loc_conf_t, hardlink),
++      NULL },
++
+       ngx_null_command
+ };
+ 
+@@ -767,7 +776,10 @@ overwrite_done:
+                                       ngx_create_dir_n, copy.path.data);
+         }
+ 
++        dlcf = ngx_http_get_module_loc_conf(r, ngx_http_dav_module);
++
+         copy.len = path.len;
++        copy.request = r;
+ 
+         tree.init_handler = NULL;
+         tree.file_handler = ngx_http_dav_copy_tree_file;
+@@ -818,6 +830,7 @@ overwrite_done:
+         cf.access = dlcf->access;
+         cf.time = ngx_file_mtime(&fi);
+         cf.log = r->connection->log;
++        cf.hardlink = dlcf->hardlink;
+ 
+         if (ngx_copy_file(path.data, copy.path.data, &cf) == NGX_OK) {
+             return NGX_HTTP_NO_CONTENT;
+@@ -935,6 +948,7 @@ ngx_http_dav_copy_tree_file(ngx_tree_ctx_t *ctx, ngx_str_t *path)
+     size_t                    len;
+     ngx_copy_file_t           cf;
+     ngx_http_dav_copy_ctx_t  *copy;
++    ngx_http_dav_loc_conf_t  *dlcf;
+ 
+     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, ctx->log, 0,
+                    "http copy file: \"%s\"", path->data);
+@@ -954,11 +968,14 @@ ngx_http_dav_copy_tree_file(ngx_tree_ctx_t *ctx, ngx_str_t *path)
+     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, ctx->log, 0,
+                    "http copy file to: \"%s\"", file);
+ 
++    dlcf = ngx_http_get_module_loc_conf(copy->request, ngx_http_dav_module);
++
+     cf.size = ctx->size;
+     cf.buf_size = 0;
+     cf.access = ctx->access;
+     cf.time = ctx->mtime;
+     cf.log = ctx->log;
++    cf.hardlink = dlcf->hardlink;
+ 
+     (void) ngx_copy_file(path->data, file, &cf);
+ 
+@@ -1096,6 +1113,7 @@ ngx_http_dav_create_loc_conf(ngx_conf_t *cf)
+     conf->min_delete_depth = NGX_CONF_UNSET_UINT;
+     conf->access = NGX_CONF_UNSET_UINT;
+     conf->create_full_put_path = NGX_CONF_UNSET;
++    conf->hardlink = NGX_CONF_UNSET;
+ 
+     return conf;
+ }
+@@ -1118,6 +1136,8 @@ ngx_http_dav_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
+     ngx_conf_merge_value(conf->create_full_put_path,
+                          prev->create_full_put_path, 0);
+ 
++    ngx_conf_merge_value(conf->hardlink, prev->hardlink, 0);
++
+     return NGX_CONF_OK;
+ }
+ 
+diff --git a/src/os/unix/ngx_files.h b/src/os/unix/ngx_files.h
+index 9c97e2b..826960b 100644
+--- a/src/os/unix/ngx_files.h
++++ b/src/os/unix/ngx_files.h
+@@ -157,6 +157,10 @@ ngx_write_fd(ngx_fd_t fd, void *buf, size_t n)
+ #define ngx_rename_file_n        "rename()"
+ 
+ 
++#define ngx_hardlink_file(o, n)  link((const char *) o, (const char *) n)
++#define ngx_hardlink_file_n      "link()"
++
++
+ #define ngx_change_file_access(n, a) chmod((const char *) n, a)
+ #define ngx_change_file_access_n "chmod()"
+ 
