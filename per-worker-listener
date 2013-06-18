@@ -1,0 +1,181 @@
+diff --git a/src/core/ngx_connection.c b/src/core/ngx_connection.c
+index 7ed781e..af48c17 100644
+--- a/src/core/ngx_connection.c
++++ b/src/core/ngx_connection.c
+@@ -275,6 +275,12 @@ ngx_open_listening_sockets(ngx_cycle_t *cycle)
+     ngx_socket_t      s;
+     ngx_listening_t  *ls;
+ 
++    struct sockaddr      *sockaddr;
++    struct sockaddr_in   *sin;
++#if (NGX_HAVE_INET6)
++    struct sockaddr_in6  *sin6;
++#endif
++
+     reuseaddr = 1;
+ #if (NGX_SUPPRESS_WARN)
+     failed = 0;
+@@ -300,6 +306,39 @@ ngx_open_listening_sockets(ngx_cycle_t *cycle)
+                 continue;
+             }
+ 
++            sockaddr = ls[i].sockaddr;
++
++            if (ngx_process == NGX_PROCESS_WORKER) {
++
++                if (!ls[i].per_worker) {
++                    continue;
++                }
++
++                sockaddr = ngx_palloc(cycle->pool, ls[i].socklen);
++                if (sockaddr == NULL) {
++                    return NGX_ERROR;
++                }
++
++                ngx_memcpy(sockaddr, ls[i].sockaddr, ls[i].socklen);
++
++                switch (ls[i].sockaddr->sa_family) {
++#if (NGX_HAVE_INET6)
++                    case AF_INET6:
++                        sin6 = (struct sockaddr_in6 *) sockaddr;
++                        sin6->sin6_port = htons(ntohs(sin6->sin6_port) +
++                                          ngx_worker_slot);
++                        break;
++#endif
++                    default: /* AF_INET */
++                        sin = (struct sockaddr_in *) sockaddr;
++                        sin->sin_port = htons(ntohs(sin->sin_port) +
++                                        ngx_worker_slot);
++                }
++
++            } else if (ls[i].per_worker) {
++                continue;
++            }
++
+             if (ls[i].inherited) {
+ 
+                 /* TODO: close on exit */
+@@ -372,7 +411,7 @@ ngx_open_listening_sockets(ngx_cycle_t *cycle)
+             ngx_log_debug2(NGX_LOG_DEBUG_CORE, log, 0,
+                            "bind() %V #%d ", &ls[i].addr_text, s);
+ 
+-            if (bind(s, ls[i].sockaddr, ls[i].socklen) == -1) {
++            if (bind(s, sockaddr, ls[i].socklen) == -1) {
+                 err = ngx_socket_errno;
+ 
+                 if (err == NGX_EADDRINUSE && ngx_test_config) {
+diff --git a/src/core/ngx_connection.h b/src/core/ngx_connection.h
+index 3daf2ee..b106b11 100644
+--- a/src/core/ngx_connection.h
++++ b/src/core/ngx_connection.h
+@@ -54,6 +54,7 @@ struct ngx_listening_s {
+     unsigned            open:1;
+     unsigned            remain:1;
+     unsigned            ignore:1;
++    unsigned            per_worker:1;
+ 
+     unsigned            bound:1;       /* already bound */
+     unsigned            inherited:1;   /* inherited from previous process */
+diff --git a/src/event/ngx_event.c b/src/event/ngx_event.c
+index b7205f4..59a9159 100644
+--- a/src/event/ngx_event.c
++++ b/src/event/ngx_event.c
+@@ -832,7 +832,6 @@ ngx_event_process_init(ngx_cycle_t *cycle)
+         if (ngx_use_accept_mutex) {
+             continue;
+         }
+-
+         if (ngx_event_flags & NGX_USE_RTSIG_EVENT) {
+             if (ngx_add_conn(c) == NGX_ERROR) {
+                 return NGX_ERROR;
+diff --git a/src/http/ngx_http.c b/src/http/ngx_http.c
+index 987ae54..eb9fbcf 100644
+--- a/src/http/ngx_http.c
++++ b/src/http/ngx_http.c
+@@ -1808,6 +1808,8 @@ ngx_http_add_listening(ngx_conf_t *cf, ngx_http_conf_addr_t *addr)
+     ls->setfib = addr->opt.setfib;
+ #endif
+ 
++    ls->per_worker = addr->opt.per_worker;
++
+     return ls;
+ }
+ 
+diff --git a/src/http/ngx_http_core_module.c b/src/http/ngx_http_core_module.c
+index 25d3dc9..5799258 100644
+--- a/src/http/ngx_http_core_module.c
++++ b/src/http/ngx_http_core_module.c
+@@ -4002,6 +4002,11 @@ ngx_http_core_listen(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+             continue;
+         }
+ 
++        if (ngx_strcmp(value[n].data, "per_worker") == 0) {
++            lsopt.per_worker = 1;
++            continue;
++        }
++
+ #if (NGX_HAVE_SETFIB)
+         if (ngx_strncmp(value[n].data, "setfib=", 7) == 0) {
+             lsopt.setfib = ngx_atoi(value[n].data + 7, value[n].len - 7);
+diff --git a/src/http/ngx_http_core_module.h b/src/http/ngx_http_core_module.h
+index 5b38000..5cde142 100644
+--- a/src/http/ngx_http_core_module.h
++++ b/src/http/ngx_http_core_module.h
+@@ -72,6 +72,7 @@ typedef struct {
+     unsigned                   default_server:1;
+     unsigned                   bind:1;
+     unsigned                   wildcard:1;
++    unsigned                   per_worker:1;
+ #if (NGX_HTTP_SSL)
+     unsigned                   ssl:1;
+ #endif
+diff --git a/src/os/unix/ngx_process.c b/src/os/unix/ngx_process.c
+index 4ef3582..3c68cee 100644
+--- a/src/os/unix/ngx_process.c
++++ b/src/os/unix/ngx_process.c
+@@ -34,6 +34,7 @@ ngx_int_t        ngx_process_slot;
+ ngx_socket_t     ngx_channel;
+ ngx_int_t        ngx_last_process;
+ ngx_process_t    ngx_processes[NGX_MAX_PROCESSES];
++ngx_int_t        ngx_worker_slot;
+ 
+ 
+ ngx_signal_t  signals[] = {
+diff --git a/src/os/unix/ngx_process.h b/src/os/unix/ngx_process.h
+index 7b5e8c0..26eccf5 100644
+--- a/src/os/unix/ngx_process.h
++++ b/src/os/unix/ngx_process.h
+@@ -83,6 +83,7 @@ extern ngx_socket_t   ngx_channel;
+ extern ngx_int_t      ngx_process_slot;
+ extern ngx_int_t      ngx_last_process;
+ extern ngx_process_t  ngx_processes[NGX_MAX_PROCESSES];
++extern ngx_int_t      ngx_worker_slot;
+ 
+ 
+ #endif /* _NGX_PROCESS_H_INCLUDED_ */
+diff --git a/src/os/unix/ngx_process_cycle.c b/src/os/unix/ngx_process_cycle.c
+index dfdfae0..ed9ddca 100644
+--- a/src/os/unix/ngx_process_cycle.c
++++ b/src/os/unix/ngx_process_cycle.c
+@@ -728,6 +728,8 @@ ngx_worker_process_cycle(ngx_cycle_t *cycle, void *data)
+ 
+     ngx_process = NGX_PROCESS_WORKER;
+ 
++    ngx_worker_slot = worker;
++
+     ngx_worker_process_init(cycle, worker);
+ 
+     ngx_setproctitle("worker process");
+@@ -959,6 +961,12 @@ ngx_worker_process_init(ngx_cycle_t *cycle, ngx_int_t worker)
+         ls[i].previous = NULL;
+     }
+ 
++    if (ngx_open_listening_sockets(cycle) != NGX_OK) {
++        ngx_log_error(NGX_LOG_ALERT, cycle->log, ngx_errno,
++                      "failed to init worker listeners");
++        exit(2);
++    }
++
+     for (i = 0; ngx_modules[i]; i++) {
+         if (ngx_modules[i]->init_process) {
+             if (ngx_modules[i]->init_process(cycle) == NGX_ERROR) {
