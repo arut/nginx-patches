@@ -10,7 +10,7 @@ Implements hardlinking in DAV copy instead of real copy.
 
 Implements per worker listeners to make requests to
 certain nginx worker. This requires `accept_mutex off`;
-This patch only works on POSIX systems (Linux, FreeBSD etc).
+Does not work on Windows.
 
     worker_processes 5;
 
