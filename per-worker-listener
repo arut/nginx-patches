@@ -1,11 +1,12 @@
 diff --git a/src/core/ngx_connection.c b/src/core/ngx_connection.c
-index 7ed781e..af48c17 100644
+index 7ed781e..7bb81e2 100644
 --- a/src/core/ngx_connection.c
 +++ b/src/core/ngx_connection.c
-@@ -275,6 +275,12 @@ ngx_open_listening_sockets(ngx_cycle_t *cycle)
+@@ -275,6 +275,13 @@ ngx_open_listening_sockets(ngx_cycle_t *cycle)
      ngx_socket_t      s;
      ngx_listening_t  *ls;
  
++    size_t                len;
 +    struct sockaddr      *sockaddr;
 +    struct sockaddr_in   *sin;
 +#if (NGX_HAVE_INET6)
@@ -15,7 +16,7 @@ index 7ed781e..af48c17 100644
      reuseaddr = 1;
  #if (NGX_SUPPRESS_WARN)
      failed = 0;
-@@ -300,6 +306,39 @@ ngx_open_listening_sockets(ngx_cycle_t *cycle)
+@@ -300,6 +307,53 @@ ngx_open_listening_sockets(ngx_cycle_t *cycle)
                  continue;
              }
  
@@ -48,6 +49,20 @@ index 7ed781e..af48c17 100644
 +                                        ngx_worker_slot);
 +                }
 +
++                len = ls[i].addr_text_max_len;
++                ls[i].addr_text.data = ngx_palloc(cycle->pool, len);
++
++                if (ls[i].addr_text.data == NULL) {
++                    return NGX_ERROR;
++                }
++
++                len = ngx_sock_ntop(sockaddr, ls[i].addr_text.data, len, 1);
++                if (len == 0) {
++                    return NGX_ERROR;
++                }
++
++                ls[i].addr_text.len = len;
++
 +            } else if (ls[i].per_worker) {
 +                continue;
 +            }
@@ -55,7 +70,7 @@ index 7ed781e..af48c17 100644
              if (ls[i].inherited) {
  
                  /* TODO: close on exit */
-@@ -372,7 +411,7 @@ ngx_open_listening_sockets(ngx_cycle_t *cycle)
+@@ -372,7 +426,7 @@ ngx_open_listening_sockets(ngx_cycle_t *cycle)
              ngx_log_debug2(NGX_LOG_DEBUG_CORE, log, 0,
                             "bind() %V #%d ", &ls[i].addr_text, s);
  
