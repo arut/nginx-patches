@@ -76,18 +76,6 @@ index 3daf2ee..b106b11 100644
  
      unsigned            bound:1;       /* already bound */
      unsigned            inherited:1;   /* inherited from previous process */
-diff --git a/src/event/ngx_event.c b/src/event/ngx_event.c
-index b7205f4..59a9159 100644
---- a/src/event/ngx_event.c
-+++ b/src/event/ngx_event.c
-@@ -832,7 +832,6 @@ ngx_event_process_init(ngx_cycle_t *cycle)
-         if (ngx_use_accept_mutex) {
-             continue;
-         }
--
-         if (ngx_event_flags & NGX_USE_RTSIG_EVENT) {
-             if (ngx_add_conn(c) == NGX_ERROR) {
-                 return NGX_ERROR;
 diff --git a/src/http/ngx_http.c b/src/http/ngx_http.c
 index 987ae54..eb9fbcf 100644
 --- a/src/http/ngx_http.c
