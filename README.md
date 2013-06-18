@@ -29,7 +29,7 @@ certain nginx worker. This requires `accept_mutex off`;
             # 2nd worker will listen 8001
             # 3rd worker will listen 8002
             # 4th worker will listen 8003
-            # 5th worker will listen 8005
+            # 5th worker will listen 8004
             listen 8000 per_worker;
             ...
         }
