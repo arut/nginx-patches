@@ -40,13 +40,13 @@ Does not work on Windows.
 
 Implements HTTP `Content-Range` support in DAV PUT request header. When PUT'ting
 large files it's now possible to split it into several requests and upload
-the data simultaniously. The behavior is allowed by HTTP standard but not implemented
+the data simultaneously. The behavior is allowed by HTTP standard but not implemented
 in nginx by default. However it's up to client to watch the consistency.
 
-  location / {
-      root /tmp;
-      dav_methods PUT;
-  }
+    location / {
+        root /tmp;
+        dav_methods PUT;
+    }
 
 Upload. Assume `/tmp/partX` are all 100-byte files.
 
