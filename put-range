@@ -1,0 +1,396 @@
+diff --git a/src/core/ngx_file.c b/src/core/ngx_file.c
+index 7e6e921..146261e 100644
+--- a/src/core/ngx_file.c
++++ b/src/core/ngx_file.c
+@@ -112,7 +112,8 @@ ngx_write_chain_to_temp_file(ngx_temp_file_t *tf, ngx_chain_t *chain)
+ 
+     if (tf->file.fd == NGX_INVALID_FILE) {
+         rc = ngx_create_temp_file(&tf->file, tf->path, tf->pool,
+-                                  tf->persistent, tf->clean, tf->access);
++                                  tf->persistent, tf->clean, tf->access,
++                                  tf->full_name, tf->size);
+ 
+         if (rc == NGX_ERROR || rc == NGX_AGAIN) {
+             return rc;
+@@ -130,7 +131,8 @@ ngx_write_chain_to_temp_file(ngx_temp_file_t *tf, ngx_chain_t *chain)
+ 
+ ngx_int_t
+ ngx_create_temp_file(ngx_file_t *file, ngx_path_t *path, ngx_pool_t *pool,
+-    ngx_uint_t persistent, ngx_uint_t clean, ngx_uint_t access)
++    ngx_uint_t persistent, ngx_uint_t clean, ngx_uint_t access,
++    ngx_uint_t full_name, off_t size)
+ {
+     uint32_t                  n;
+     ngx_err_t                 err;
+@@ -159,6 +161,41 @@ ngx_create_temp_file(ngx_file_t *file, ngx_path_t *path, ngx_pool_t *pool,
+         return NGX_ERROR;
+     }
+ 
++    if (full_name) {
++        file->name.data[path->name.len] = 0;
++
++        ngx_log_debug1(NGX_LOG_DEBUG_CORE, file->log, 0,
++                       "create file: %s", file->name.data);
++
++        file->fd = ngx_open_file(file->name.data, NGX_FILE_WRONLY,
++                                 NGX_FILE_CREATE_OR_OPEN, access);
++
++        ngx_log_debug1(NGX_LOG_DEBUG_CORE, file->log, 0,
++                       "file fd:%d", file->fd);
++
++        if (file->fd == NGX_INVALID_FILE) {
++            ngx_log_error(NGX_LOG_CRIT, file->log, ngx_errno,
++                          ngx_open_file_n " \"%s\" failed",
++                          file->name.data);
++            return NGX_ERROR;
++        }
++
++        cln->handler = ngx_pool_cleanup_file;
++        clnf = cln->data;
++
++        clnf->fd = file->fd;
++        clnf->name = file->name.data;
++        clnf->log = pool->log;
++
++        if (size && ftruncate(file->fd, size) == -1) {
++            ngx_log_error(NGX_LOG_CRIT, file->log, ngx_errno,
++                          "ftruncate() \"%s\" failed", file->name.data);
++            return NGX_ERROR;
++        }
++
++        return NGX_OK;
++    }
++
+     for ( ;; ) {
+         (void) ngx_sprintf(file->name.data + path->name.len + 1 + path->len,
+                            "%010uD%Z", n);
+diff --git a/src/core/ngx_file.h b/src/core/ngx_file.h
+index 3ea6c28..4938ebd 100644
+--- a/src/core/ngx_file.h
++++ b/src/core/ngx_file.h
+@@ -62,6 +62,7 @@ typedef struct {
+ typedef struct {
+     ngx_file_t                 file;
+     off_t                      offset;
++    off_t                      size;
+     ngx_path_t                *path;
+     ngx_pool_t                *pool;
+     char                      *warn;
+@@ -71,6 +72,7 @@ typedef struct {
+     unsigned                   log_level:8;
+     unsigned                   persistent:1;
+     unsigned                   clean:1;
++    unsigned                   full_name:1;
+ } ngx_temp_file_t;
+ 
+ 
+@@ -128,7 +130,7 @@ ngx_int_t ngx_get_full_name(ngx_pool_t *pool, ngx_str_t *prefix,
+ ssize_t ngx_write_chain_to_temp_file(ngx_temp_file_t *tf, ngx_chain_t *chain);
+ ngx_int_t ngx_create_temp_file(ngx_file_t *file, ngx_path_t *path,
+     ngx_pool_t *pool, ngx_uint_t persistent, ngx_uint_t clean,
+-    ngx_uint_t access);
++    ngx_uint_t access, ngx_uint_t full_name, off_t size);
+ void ngx_create_hashed_filename(ngx_path_t *path, u_char *file, size_t len);
+ ngx_int_t ngx_create_path(ngx_file_t *file, ngx_path_t *path);
+ ngx_err_t ngx_create_full_path(u_char *dir, ngx_uint_t access);
+diff --git a/src/http/modules/ngx_http_dav_module.c b/src/http/modules/ngx_http_dav_module.c
+index a97c60e..ebd7126 100644
+--- a/src/http/modules/ngx_http_dav_module.c
++++ b/src/http/modules/ngx_http_dav_module.c
+@@ -36,6 +36,9 @@ typedef struct {
+ 
+ static ngx_int_t ngx_http_dav_handler(ngx_http_request_t *r);
+ 
++static ngx_int_t ngx_http_dav_inplace_put(ngx_http_request_t *r);
++static off_t ngx_http_dav_parse_offset(u_char **p, u_char *last);
++static void ngx_http_dav_inplace_put_handler(ngx_http_request_t *r);
+ static void ngx_http_dav_put_handler(ngx_http_request_t *r);
+ 
+ static ngx_int_t ngx_http_dav_delete_handler(ngx_http_request_t *r);
+@@ -163,6 +166,10 @@ ngx_http_dav_handler(ngx_http_request_t *r)
+             return NGX_HTTP_CONFLICT;
+         }
+ 
++        if (r->headers_in.content_range) {
++            return ngx_http_dav_inplace_put(r);
++        }
++
+         r->request_body_in_file_only = 1;
+         r->request_body_in_persistent_file = 1;
+         r->request_body_in_clean_file = 1;
+@@ -198,6 +205,168 @@ ngx_http_dav_handler(ngx_http_request_t *r)
+ }
+ 
+ 
++static ngx_int_t
++ngx_http_dav_inplace_put(ngx_http_request_t *r)
++{
++    off_t                     first, size;
++    size_t                    root;
++    u_char                   *p, *last;
++    ngx_int_t                 rc;
++    ngx_str_t                *content_range;
++    ngx_path_t               *path;
++    ngx_table_elt_t          *out_content_range;
++    ngx_http_dav_loc_conf_t  *dlcf;
++
++    content_range = &r->headers_in.content_range->value;
++
++    if (content_range->len < 7
++        || ngx_strncasecmp(content_range->data, (u_char *) "bytes ", 6))
++    {
++        goto bad_range;
++    }
++
++    content_range->data += 6;
++    content_range->len -= 6;
++
++    p = content_range->data;
++    last = p + content_range->len;
++
++    first = 0;
++    size = 0;
++
++    if (p == last) {
++        goto bad_range;
++    }
++
++    if (*p != '*') {
++
++        first = ngx_http_dav_parse_offset(&p, last);
++
++        if (p == last || *p != (u_char) '-') {
++            goto bad_range;
++        }
++
++        p++;
++
++        size = ngx_http_dav_parse_offset(&p, last);
++
++    } else {
++        p++;
++    }
++
++    if (p == last || *p != (u_char) '/') {
++        goto bad_range;
++    }
++
++    p++;
++
++    if (p == last) {
++        goto bad_range;
++    }
++
++    if (*p != '*') {
++        size = ngx_http_dav_parse_offset(&p, last);
++        if (p != last) {
++            goto bad_range;
++        }
++    }
++
++    dlcf = ngx_http_get_module_loc_conf(r, ngx_http_dav_module);
++
++    path = ngx_pcalloc(r->pool, sizeof(ngx_path_t));
++    if (path == NULL) {
++        return NGX_ERROR;
++    }
++
++    ngx_http_map_uri_to_path(r, &path->name, &root, 0);
++
++    path->name.len--;
++
++    r->request_body_in_file_only = 1;
++    r->request_body_in_persistent_file = 1;
++    r->request_body_in_clean_file = 0;
++    r->request_body_file_log_level = 0;
++    r->request_body_path = path;
++    r->request_body_access = dlcf->access;
++    r->request_body_full_name = 1;
++    r->request_body_offset = first;
++    r->request_body_size = size;
++
++    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
++                   "http inplace put filename: \"%s\"", path->name.data);
++
++    rc = ngx_http_read_client_request_body(r,
++                                           ngx_http_dav_inplace_put_handler);
++
++    if (rc >= NGX_HTTP_SPECIAL_RESPONSE) {
++        return rc;
++    }
++
++    return NGX_DONE;
++
++bad_range:
++
++    r->headers_out.status = NGX_HTTP_RANGE_NOT_SATISFIABLE;
++
++    out_content_range = ngx_list_push(&r->headers_out.headers);
++    if (content_range == NULL) {
++        return NGX_ERROR;
++    }
++
++    r->headers_out.content_range = out_content_range;
++
++    out_content_range->hash = 1;
++
++    ngx_str_set(&out_content_range->key, "Content-Range");
++    ngx_str_set(&out_content_range->value, "*");
++
++    ngx_http_clear_content_length(r);
++
++    return NGX_HTTP_RANGE_NOT_SATISFIABLE;
++}
++
++
++static off_t
++ngx_http_dav_parse_offset(u_char **p, u_char *last)
++{
++    off_t   ret;
++    u_char  c;
++
++    ret = 0;
++
++    while (*p != last) {
++
++        c = **p;
++
++        if (c < (u_char) '0' || c > (u_char) '9') {
++            break;
++        }
++
++        ret = ret * 10 + (c - (u_char) '0');
++
++        (*p)++;
++    }
++
++    return ret;
++}
++
++
++static void
++ngx_http_dav_inplace_put_handler(ngx_http_request_t *r)
++{
++    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
++                   "http inplace put done \"%s\"",
++                   r->request_body_path->name.data);
++
++    r->headers_out.status = NGX_HTTP_CREATED;
++    r->headers_out.content_length_n = 0;
++    r->header_only = 1;
++
++    ngx_http_finalize_request(r, ngx_http_send_header(r));
++    return;
++}
++
++
+ static void
+ ngx_http_dav_put_handler(ngx_http_request_t *r)
+ {
+diff --git a/src/http/ngx_http_request.c b/src/http/ngx_http_request.c
+index 1f6d246..b793e06 100644
+--- a/src/http/ngx_http_request.c
++++ b/src/http/ngx_http_request.c
+@@ -114,6 +114,10 @@ ngx_http_header_t  ngx_http_headers_in[] = {
+                  offsetof(ngx_http_headers_in_t, content_type),
+                  ngx_http_process_header_line },
+ 
++    { ngx_string("Content-Range"),
++                 offsetof(ngx_http_headers_in_t, content_range),
++                 ngx_http_process_header_line },
++
+     { ngx_string("Range"), offsetof(ngx_http_headers_in_t, range),
+                  ngx_http_process_header_line },
+ 
+diff --git a/src/http/ngx_http_request.h b/src/http/ngx_http_request.h
+index 3b0858a..1324196 100644
+--- a/src/http/ngx_http_request.h
++++ b/src/http/ngx_http_request.h
+@@ -183,6 +183,7 @@ typedef struct {
+     ngx_table_elt_t                  *content_length;
+     ngx_table_elt_t                  *content_type;
+ 
++    ngx_table_elt_t                  *content_range;
+     ngx_table_elt_t                  *range;
+     ngx_table_elt_t                  *if_range;
+ 
+@@ -383,6 +384,10 @@ struct ngx_http_request_s {
+     ngx_http_headers_out_t            headers_out;
+ 
+     ngx_http_request_body_t          *request_body;
++    ngx_path_t                       *request_body_path;
++    ngx_uint_t                        request_body_access;
++    off_t                             request_body_offset;
++    off_t                             request_body_size;
+ 
+     time_t                            lingering_time;
+     time_t                            start_sec;
+@@ -472,6 +477,7 @@ struct ngx_http_request_s {
+     unsigned                          request_body_in_clean_file:1;
+     unsigned                          request_body_file_group_access:1;
+     unsigned                          request_body_file_log_level:3;
++    unsigned                          request_body_full_name:1;
+ 
+     unsigned                          subrequest_in_memory:1;
+     unsigned                          waited:1;
+diff --git a/src/http/ngx_http_request_body.c b/src/http/ngx_http_request_body.c
+index dc1fcde..b59a37c 100644
+--- a/src/http/ngx_http_request_body.c
++++ b/src/http/ngx_http_request_body.c
+@@ -423,12 +423,17 @@ ngx_http_write_request_body(ngx_http_request_t *r)
+ 
+         tf->file.fd = NGX_INVALID_FILE;
+         tf->file.log = r->connection->log;
+-        tf->path = clcf->client_body_temp_path;
++        tf->path = r->request_body_path ? r->request_body_path :
++                   clcf->client_body_temp_path;
+         tf->pool = r->pool;
+         tf->warn = "a client request body is buffered to a temporary file";
+         tf->log_level = r->request_body_file_log_level;
+         tf->persistent = r->request_body_in_persistent_file;
+         tf->clean = r->request_body_in_clean_file;
++        tf->access = r->request_body_access;
++        tf->offset = r->request_body_offset;
++        tf->size = r->request_body_size;
++        tf->full_name = r->request_body_full_name;
+ 
+         if (r->request_body_file_group_access) {
+             tf->access = 0660;
+@@ -440,7 +445,8 @@ ngx_http_write_request_body(ngx_http_request_t *r)
+             /* empty body with r->request_body_in_file_only */
+ 
+             if (ngx_create_temp_file(&tf->file, tf->path, tf->pool,
+-                                     tf->persistent, tf->clean, tf->access)
++                                     tf->persistent, tf->clean, tf->access,
++                                     tf->full_name, tf->size)
+                 != NGX_OK)
+             {
+                 return NGX_ERROR;
+diff --git a/src/http/ngx_http_spdy.c b/src/http/ngx_http_spdy.c
+index 36e23be..cb254da 100644
+--- a/src/http/ngx_http_spdy.c
++++ b/src/http/ngx_http_spdy.c
+@@ -2531,7 +2531,8 @@ ngx_http_spdy_init_request_body(ngx_http_request_t *r)
+ 
+         if (r->spdy_stream->in_closed
+             && ngx_create_temp_file(&tf->file, tf->path, tf->pool,
+-                                    tf->persistent, tf->clean, tf->access)
++                                    tf->persistent, tf->clean, tf->access,
++                                    tf->full_name, 0)
+                != NGX_OK)
+         {
+             return NGX_ERROR;
+diff --git a/src/http/ngx_http_upstream.c b/src/http/ngx_http_upstream.c
+index 4a4f8eb..f86c959 100644
+--- a/src/http/ngx_http_upstream.c
++++ b/src/http/ngx_http_upstream.c
+@@ -3153,7 +3153,8 @@ ngx_http_upstream_store(ngx_http_request_t *r, ngx_http_upstream_t *u)
+         tf->persistent = 1;
+ 
+         if (ngx_create_temp_file(&tf->file, tf->path, tf->pool,
+-                                 tf->persistent, tf->clean, tf->access)
++                                 tf->persistent, tf->clean, tf->access,
++                                 tf->full_name, 0)
+             != NGX_OK)
+         {
+             return;
