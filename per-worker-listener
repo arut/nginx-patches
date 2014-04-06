@@ -1,8 +1,8 @@
 diff --git a/src/core/ngx_connection.c b/src/core/ngx_connection.c
-index 7ed781e..7bb81e2 100644
+index 6b6e3b3..b657ac4 100644
 --- a/src/core/ngx_connection.c
 +++ b/src/core/ngx_connection.c
-@@ -275,6 +275,13 @@ ngx_open_listening_sockets(ngx_cycle_t *cycle)
+@@ -311,6 +311,13 @@ ngx_open_listening_sockets(ngx_cycle_t *cycle)
      ngx_socket_t      s;
      ngx_listening_t  *ls;
  
@@ -16,7 +16,7 @@ index 7ed781e..7bb81e2 100644
      reuseaddr = 1;
  #if (NGX_SUPPRESS_WARN)
      failed = 0;
-@@ -300,6 +307,53 @@ ngx_open_listening_sockets(ngx_cycle_t *cycle)
+@@ -336,6 +343,53 @@ ngx_open_listening_sockets(ngx_cycle_t *cycle)
                  continue;
              }
  
@@ -56,7 +56,7 @@ index 7ed781e..7bb81e2 100644
 +                    return NGX_ERROR;
 +                }
 +
-+                len = ngx_sock_ntop(sockaddr, ls[i].addr_text.data, len, 1);
++                len = ngx_sock_ntop(sockaddr, ls[i].socklen, ls[i].addr_text.data, len, 1);
 +                if (len == 0) {
 +                    return NGX_ERROR;
 +                }
@@ -70,7 +70,7 @@ index 7ed781e..7bb81e2 100644
              if (ls[i].inherited) {
  
                  /* TODO: close on exit */
-@@ -372,7 +426,7 @@ ngx_open_listening_sockets(ngx_cycle_t *cycle)
+@@ -408,7 +462,7 @@ ngx_open_listening_sockets(ngx_cycle_t *cycle)
              ngx_log_debug2(NGX_LOG_DEBUG_CORE, log, 0,
                             "bind() %V #%d ", &ls[i].addr_text, s);
  
@@ -80,7 +80,7 @@ index 7ed781e..7bb81e2 100644
  
                  if (err == NGX_EADDRINUSE && ngx_test_config) {
 diff --git a/src/core/ngx_connection.h b/src/core/ngx_connection.h
-index 3daf2ee..b106b11 100644
+index d9bc60a..2b22808 100644
 --- a/src/core/ngx_connection.h
 +++ b/src/core/ngx_connection.h
 @@ -54,6 +54,7 @@ struct ngx_listening_s {
@@ -92,11 +92,11 @@ index 3daf2ee..b106b11 100644
      unsigned            bound:1;       /* already bound */
      unsigned            inherited:1;   /* inherited from previous process */
 diff --git a/src/http/ngx_http.c b/src/http/ngx_http.c
-index 987ae54..eb9fbcf 100644
+index c3ac726..3672b7a 100644
 --- a/src/http/ngx_http.c
 +++ b/src/http/ngx_http.c
-@@ -1808,6 +1808,8 @@ ngx_http_add_listening(ngx_conf_t *cf, ngx_http_conf_addr_t *addr)
-     ls->setfib = addr->opt.setfib;
+@@ -1817,6 +1817,8 @@ ngx_http_add_listening(ngx_conf_t *cf, ngx_http_conf_addr_t *addr)
+     ls->fastopen = addr->opt.fastopen;
  #endif
  
 +    ls->per_worker = addr->opt.per_worker;
@@ -105,10 +105,10 @@ index 987ae54..eb9fbcf 100644
  }
  
 diff --git a/src/http/ngx_http_core_module.c b/src/http/ngx_http_core_module.c
-index 25d3dc9..5799258 100644
+index 74a448a..e447f86 100644
 --- a/src/http/ngx_http_core_module.c
 +++ b/src/http/ngx_http_core_module.c
-@@ -4002,6 +4002,11 @@ ngx_http_core_listen(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+@@ -4026,6 +4026,11 @@ ngx_http_core_listen(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
              continue;
          }
  
@@ -121,7 +121,7 @@ index 25d3dc9..5799258 100644
          if (ngx_strncmp(value[n].data, "setfib=", 7) == 0) {
              lsopt.setfib = ngx_atoi(value[n].data + 7, value[n].len - 7);
 diff --git a/src/http/ngx_http_core_module.h b/src/http/ngx_http_core_module.h
-index 5b38000..5cde142 100644
+index 220c94e..76a4e98 100644
 --- a/src/http/ngx_http_core_module.h
 +++ b/src/http/ngx_http_core_module.h
 @@ -72,6 +72,7 @@ typedef struct {
@@ -133,7 +133,7 @@ index 5b38000..5cde142 100644
      unsigned                   ssl:1;
  #endif
 diff --git a/src/os/unix/ngx_process.c b/src/os/unix/ngx_process.c
-index 4ef3582..3c68cee 100644
+index 6f3f385..a421c09 100644
 --- a/src/os/unix/ngx_process.c
 +++ b/src/os/unix/ngx_process.c
 @@ -34,6 +34,7 @@ ngx_int_t        ngx_process_slot;
@@ -157,10 +157,10 @@ index 7b5e8c0..26eccf5 100644
  
  #endif /* _NGX_PROCESS_H_INCLUDED_ */
 diff --git a/src/os/unix/ngx_process_cycle.c b/src/os/unix/ngx_process_cycle.c
-index dfdfae0..ed9ddca 100644
+index 499039a..c54b4d5 100644
 --- a/src/os/unix/ngx_process_cycle.c
 +++ b/src/os/unix/ngx_process_cycle.c
-@@ -728,6 +728,8 @@ ngx_worker_process_cycle(ngx_cycle_t *cycle, void *data)
+@@ -737,6 +737,8 @@ ngx_worker_process_cycle(ngx_cycle_t *cycle, void *data)
  
      ngx_process = NGX_PROCESS_WORKER;
  
@@ -169,7 +169,7 @@ index dfdfae0..ed9ddca 100644
      ngx_worker_process_init(cycle, worker);
  
      ngx_setproctitle("worker process");
-@@ -959,6 +961,12 @@ ngx_worker_process_init(ngx_cycle_t *cycle, ngx_int_t worker)
+@@ -970,6 +972,12 @@ ngx_worker_process_init(ngx_cycle_t *cycle, ngx_int_t worker)
          ls[i].previous = NULL;
      }
  
