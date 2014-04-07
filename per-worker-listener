@@ -1,8 +1,16 @@
 diff --git a/src/core/ngx_connection.c b/src/core/ngx_connection.c
-index 6b6e3b3..b657ac4 100644
+index 6b6e3b3..5c9529c 100644
 --- a/src/core/ngx_connection.c
 +++ b/src/core/ngx_connection.c
-@@ -311,6 +311,13 @@ ngx_open_listening_sockets(ngx_cycle_t *cycle)
+@@ -8,6 +8,7 @@
+ #include <ngx_config.h>
+ #include <ngx_core.h>
+ #include <ngx_event.h>
++#include <nginx.h>
+ 
+ 
+ ngx_os_io_t  ngx_io;
+@@ -311,6 +312,13 @@ ngx_open_listening_sockets(ngx_cycle_t *cycle)
      ngx_socket_t      s;
      ngx_listening_t  *ls;
  
@@ -16,7 +24,7 @@ index 6b6e3b3..b657ac4 100644
      reuseaddr = 1;
  #if (NGX_SUPPRESS_WARN)
      failed = 0;
-@@ -336,6 +343,53 @@ ngx_open_listening_sockets(ngx_cycle_t *cycle)
+@@ -336,6 +344,57 @@ ngx_open_listening_sockets(ngx_cycle_t *cycle)
                  continue;
              }
  
@@ -56,7 +64,11 @@ index 6b6e3b3..b657ac4 100644
 +                    return NGX_ERROR;
 +                }
 +
-+                len = ngx_sock_ntop(sockaddr, ls[i].socklen, ls[i].addr_text.data, len, 1);
++                len = ngx_sock_ntop(sockaddr,
++#if (nginx_version >= 1005003)
++				    ls[i].socklen,
++#endif
++				    ls[i].addr_text.data, len, 1);
 +                if (len == 0) {
 +                    return NGX_ERROR;
 +                }
@@ -70,7 +82,7 @@ index 6b6e3b3..b657ac4 100644
              if (ls[i].inherited) {
  
                  /* TODO: close on exit */
-@@ -408,7 +462,7 @@ ngx_open_listening_sockets(ngx_cycle_t *cycle)
+@@ -408,7 +467,7 @@ ngx_open_listening_sockets(ngx_cycle_t *cycle)
              ngx_log_debug2(NGX_LOG_DEBUG_CORE, log, 0,
                             "bind() %V #%d ", &ls[i].addr_text, s);
  
