@@ -1,0 +1,216 @@
+# HG changeset patch
+# Parent f358414ce16c0d896ab730e43c0b68e3e73af7a7
+
+diff -r f358414ce16c src/http/modules/ngx_http_dav_module.c
+--- a/src/http/modules/ngx_http_dav_module.c	Fri Apr 11 07:34:37 2014 +0400
++++ b/src/http/modules/ngx_http_dav_module.c	Fri Apr 11 08:26:43 2014 +0400
+@@ -38,6 +38,8 @@ static ngx_int_t ngx_http_dav_inplace_pu
+ static off_t ngx_http_dav_parse_offset(u_char **p, u_char *last);
+ static void ngx_http_dav_inplace_put_handler(ngx_http_request_t *r);
+ static void ngx_http_dav_put_handler(ngx_http_request_t *r);
++static ngx_int_t ngx_http_dav_put_report_handler(ngx_http_request_t *r,
++    off_t size);
+ 
+ static ngx_int_t ngx_http_dav_delete_handler(ngx_http_request_t *r);
+ static ngx_int_t ngx_http_dav_delete_path(ngx_http_request_t *r,
+@@ -66,6 +68,9 @@ static char *ngx_http_dav_merge_loc_conf
+ static ngx_int_t ngx_http_dav_init(ngx_conf_t *cf);
+ 
+ 
++static ngx_str_t ngx_http_dav_put_report = ngx_string("x_put_report");
++
++
+ static ngx_conf_bitmask_t  ngx_http_dav_methods_mask[] = {
+     { ngx_string("off"), NGX_HTTP_DAV_OFF },
+     { ngx_string("put"), NGX_HTTP_PUT },
+@@ -147,6 +152,7 @@ ngx_http_dav_handler(ngx_http_request_t 
+ {
+     ngx_int_t                 rc;
+     ngx_http_dav_loc_conf_t  *dlcf;
++    ngx_http_variable_value_t vv;
+ 
+     dlcf = ngx_http_get_module_loc_conf(r, ngx_http_dav_module);
+ 
+@@ -164,6 +170,26 @@ ngx_http_dav_handler(ngx_http_request_t 
+             return NGX_HTTP_CONFLICT;
+         }
+ 
++        if (ngx_http_variable_unknown_header(&vv, &ngx_http_dav_put_report,
++                                             &r->headers_in.headers.part, 0)
++            == NGX_OK && vv.valid)
++        {
++            rc = ngx_atoi(vv.data, vv.len);
++
++            if (rc == NGX_ERROR) {
++                ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
++                              "invalid %V value:\"%*s\"",
++                              &ngx_http_dav_put_report, vv.len, vv.data);
++                return NGX_HTTP_INTERNAL_SERVER_ERROR;
++            }
++
++            ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
++                           "dav put report:%i", rc);
++
++            r->request_body_report_size = rc;
++            r->request_body_report_handler = ngx_http_dav_put_report_handler;
++        }
++
+         if (r->headers_in.content_range) {
+             return ngx_http_dav_inplace_put(r);
+         }
+@@ -352,10 +378,19 @@ ngx_http_dav_parse_offset(u_char **p, u_
+ static void
+ ngx_http_dav_inplace_put_handler(ngx_http_request_t *r)
+ {
++    ngx_http_dav_loc_conf_t  *dlcf;
++
+     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                    "http inplace put done \"%s\"",
+                    r->request_body_path->name.data);
+ 
++    dlcf = ngx_http_get_module_loc_conf(r, ngx_http_dav_module);
++
++    if (r->request_body_report_size) {
++        ngx_http_finalize_request(r, ngx_http_dav_put_report_handler(r, 0));
++        return;
++    }
++
+     r->headers_out.status = NGX_HTTP_CREATED;
+     r->headers_out.content_length_n = 0;
+     r->header_only = 1;
+@@ -444,6 +479,11 @@ ngx_http_dav_put_handler(ngx_http_reques
+         r->headers_out.content_length_n = 0;
+     }
+ 
++    if (r->request_body_report_size) {
++        ngx_http_finalize_request(r, ngx_http_dav_put_report_handler(r, 0));
++        return;
++    }
++
+     r->headers_out.status = status;
+     r->header_only = 1;
+ 
+@@ -453,6 +493,44 @@ ngx_http_dav_put_handler(ngx_http_reques
+ 
+ 
+ static ngx_int_t
++ngx_http_dav_put_report_handler(ngx_http_request_t *r, off_t size)
++{
++    ngx_buf_t    *b;
++    ngx_chain_t  *cl;
++
++    if (!r->header_sent) {
++        r->headers_out.content_length_n = -1;
++        r->headers_out.status = NGX_HTTP_OK;
++
++        ngx_str_set(&r->headers_out.content_type, "text/plain");
++        ngx_http_send_header(r);
++    }
++
++    cl = ngx_alloc_chain_link(r->pool);
++    if (cl == NULL) {
++        return NGX_ERROR;
++    }
++
++    b = ngx_create_temp_buf(r->pool, NGX_OFF_T_LEN + 2);
++    if (b == NULL) {
++        return NGX_ERROR;
++    }
++
++    b->last = ngx_sprintf(b->last, "%O\r\n",
++                          size ? size : r->request_body_report_max);
++
++    if (size == 0) {
++        b->last_buf = 1;
++    }
++
++    cl->buf = b;
++    cl->next = NULL;
++
++    return ngx_http_output_filter(r, cl);
++}
++
++
++static ngx_int_t
+ ngx_http_dav_delete_handler(ngx_http_request_t *r)
+ {
+     size_t                    root;
+diff -r f358414ce16c src/http/ngx_http_request.h
+--- a/src/http/ngx_http_request.h	Fri Apr 11 07:34:37 2014 +0400
++++ b/src/http/ngx_http_request.h	Fri Apr 11 08:26:43 2014 +0400
+@@ -355,6 +355,8 @@ struct ngx_http_posted_request_s {
+ 
+ typedef ngx_int_t (*ngx_http_handler_pt)(ngx_http_request_t *r);
+ typedef void (*ngx_http_event_handler_pt)(ngx_http_request_t *r);
++typedef ngx_int_t (*ngx_http_request_body_report_handler_pt)(
++    ngx_http_request_t *r, off_t size);
+ 
+ 
+ struct ngx_http_request_s {
+@@ -389,6 +391,10 @@ struct ngx_http_request_s {
+     ngx_uint_t                        request_body_access;
+     off_t                             request_body_offset;
+     off_t                             request_body_size;
++    size_t                            request_body_report_size;
++    off_t                             request_body_report_max;
++    ngx_http_request_body_report_handler_pt
++                                      request_body_report_handler;
+ 
+     time_t                            lingering_time;
+     time_t                            start_sec;
+diff -r f358414ce16c src/http/ngx_http_request_body.c
+--- a/src/http/ngx_http_request_body.c	Fri Apr 11 07:34:37 2014 +0400
++++ b/src/http/ngx_http_request_body.c	Fri Apr 11 08:26:43 2014 +0400
+@@ -13,6 +13,8 @@
+ static void ngx_http_read_client_request_body_handler(ngx_http_request_t *r);
+ static ngx_int_t ngx_http_do_read_client_request_body(ngx_http_request_t *r);
+ static ngx_int_t ngx_http_write_request_body(ngx_http_request_t *r);
++static ngx_int_t ngx_http_report_request_body(ngx_http_request_t *r,
++    off_t size, off_t add);
+ static ngx_int_t ngx_http_read_discarded_request_body(ngx_http_request_t *r);
+ static ngx_int_t ngx_http_discard_request_body_filter(ngx_http_request_t *r,
+     ngx_buf_t *b);
+@@ -480,6 +482,10 @@ ngx_http_write_request_body(ngx_http_req
+         return NGX_ERROR;
+     }
+ 
++    if (ngx_http_report_request_body(r, rb->temp_file->offset, n) != NGX_OK) {
++        return NGX_ERROR;
++    }
++
+     rb->temp_file->offset += n;
+ 
+     /* mark all buffers as written */
+@@ -494,6 +500,32 @@ ngx_http_write_request_body(ngx_http_req
+ }
+ 
+ 
++static ngx_int_t
++ngx_http_report_request_body(ngx_http_request_t *r, off_t size, off_t add)
++{
++    off_t  rep_size;
++
++    if (r->request_body_report_handler == NULL) {
++        return NGX_OK;
++    }
++
++    rep_size = (size / r->request_body_report_size + 1)
++               * r->request_body_report_size;
++
++    while (rep_size <= size + add) {
++        if (r->request_body_report_handler(r, rep_size) == NGX_ERROR) {
++            return NGX_ERROR;
++        }
++
++        rep_size += r->request_body_report_size;
++    }
++
++    r->request_body_report_max = size + add;
++
++    return NGX_OK;
++}
++
++
+ ngx_int_t
+ ngx_http_discard_request_body(ngx_http_request_t *r)
+ {

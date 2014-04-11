@@ -57,3 +57,10 @@ Upload. Assume `/tmp/partX` are all 100-byte files.
 Download
 
     curl localhost:8088/testfile
+
+## dav-put-report
+
+Reports upload progress to the client as chunked response. Applied after `put-range`.
+Report interval is read from X-Put-Report header.
+
+    curl -XPUT -H "X-Put-Report: 500" -H "Content-Range: bytes 100-200/100" --data-binary @/tmp/test localhost:8000/dav/test
