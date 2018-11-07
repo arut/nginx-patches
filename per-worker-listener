@@ -1,4 +1,4 @@
-diff --git a/src/core/ngx_connection.c b/src/core/ngx_connection.c
+diff --git a/src/core/ngx_connection.c b/src/core/ngx_connection.c                                                                                              [156/198]
 index 6b6e3b3..5c9529c 100644
 --- a/src/core/ngx_connection.c
 +++ b/src/core/ngx_connection.c
@@ -27,7 +27,7 @@ index 6b6e3b3..5c9529c 100644
 @@ -336,6 +344,57 @@ ngx_open_listening_sockets(ngx_cycle_t *cycle)
                  continue;
              }
- 
+
 +            sockaddr = ls[i].sockaddr;
 +
 +            if (ngx_process == NGX_PROCESS_WORKER) {
@@ -66,9 +66,9 @@ index 6b6e3b3..5c9529c 100644
 +
 +                len = ngx_sock_ntop(sockaddr,
 +#if (nginx_version >= 1005003)
-+				    ls[i].socklen,
++                                   ls[i].socklen,
 +#endif
-+				    ls[i].addr_text.data, len, 1);
++                                   ls[i].addr_text.data, len, 1);
 +                if (len == 0) {
 +                    return NGX_ERROR;
 +                }
@@ -95,12 +95,12 @@ diff --git a/src/core/ngx_connection.h b/src/core/ngx_connection.h
 index d9bc60a..2b22808 100644
 --- a/src/core/ngx_connection.h
 +++ b/src/core/ngx_connection.h
-@@ -54,6 +54,7 @@ struct ngx_listening_s {
+@@ -56,6 +56,7 @@
      unsigned            open:1;
      unsigned            remain:1;
      unsigned            ignore:1;
 +    unsigned            per_worker:1;
- 
+
      unsigned            bound:1;       /* already bound */
      unsigned            inherited:1;   /* inherited from previous process */
 diff --git a/src/http/ngx_http.c b/src/http/ngx_http.c
@@ -136,14 +136,14 @@ diff --git a/src/http/ngx_http_core_module.h b/src/http/ngx_http_core_module.h
 index 220c94e..76a4e98 100644
 --- a/src/http/ngx_http_core_module.h
 +++ b/src/http/ngx_http_core_module.h
-@@ -72,6 +72,7 @@ typedef struct {
+@@ -72,6 +72,7 @@
      unsigned                   default_server:1;
      unsigned                   bind:1;
      unsigned                   wildcard:1;
 +    unsigned                   per_worker:1;
- #if (NGX_HTTP_SSL)
      unsigned                   ssl:1;
- #endif
+     unsigned                   http2:1;
+ #if (NGX_HAVE_INET6)
 diff --git a/src/os/unix/ngx_process.c b/src/os/unix/ngx_process.c
 index 6f3f385..a421c09 100644
 --- a/src/os/unix/ngx_process.c
@@ -172,16 +172,16 @@ diff --git a/src/os/unix/ngx_process_cycle.c b/src/os/unix/ngx_process_cycle.c
 index 499039a..c54b4d5 100644
 --- a/src/os/unix/ngx_process_cycle.c
 +++ b/src/os/unix/ngx_process_cycle.c
-@@ -737,6 +737,8 @@ ngx_worker_process_cycle(ngx_cycle_t *cycle, void *data)
- 
-     ngx_process = NGX_PROCESS_WORKER;
+@@ -729,6 +729,8 @@
+ {
+     ngx_int_t worker = (intptr_t) data;
  
 +    ngx_worker_slot = worker;
 +
-     ngx_worker_process_init(cycle, worker);
+     ngx_process = NGX_PROCESS_WORKER;
+     ngx_worker = worker;
  
-     ngx_setproctitle("worker process");
-@@ -970,6 +972,12 @@ ngx_worker_process_init(ngx_cycle_t *cycle, ngx_int_t worker)
+@@ -926,6 +928,12 @@
          ls[i].previous = NULL;
      }
  
@@ -191,6 +191,6 @@ index 499039a..c54b4d5 100644
 +        exit(2);
 +    }
 +
-     for (i = 0; ngx_modules[i]; i++) {
-         if (ngx_modules[i]->init_process) {
-             if (ngx_modules[i]->init_process(cycle) == NGX_ERROR) {
+     for (i = 0; cycle->modules[i]; i++) {
+         if (cycle->modules[i]->init_process) {
+             if (cycle->modules[i]->init_process(cycle) == NGX_ERROR) {
